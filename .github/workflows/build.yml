@@ -1,0 +1,95 @@
+name: Build and test desktop application
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*", "release-*" ]
+  workflow_dispatch:
+    inputs:
+      create_draft_release:
+        description: Create a draft GitHub Release after a successful Windows build
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test tools
+        run: python -m pip install -e ".[dev]"
+      - name: Lint Python sources
+        run: python -m ruff check src tests
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest
+
+  windows-build:
+    name: Build Windows executables
+    runs-on: windows-latest
+    needs: tests
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and PyInstaller
+        run: python -m pip install -e ".[dev]"
+      - name: Build main desktop app
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name DeepSearch_Chat_App --paths src --collect-submodules pygments
+          src/deepsearch/__main__.py
+      - name: Build usage-limit editor
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name UsageLimitEditor --paths src
+          src/deepsearch/admin.py
+      - name: Smoke-check build outputs
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/DeepSearch_Chat_App.exe")) { throw "Main executable was not built" }
+          if (!(Test-Path "dist/UsageLimitEditor.exe")) { throw "Usage-limit editor was not built" }
+      - name: Upload Windows executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeepSearch-Windows-${{ github.run_number }}
+          path: |
+            dist/DeepSearch_Chat_App.exe
+            dist/UsageLimitEditor.exe
+          if-no-files-found: error
+          retention-days: 30
+      - name: Create draft GitHub Release
+        if: >-
+          startsWith(github.ref, 'refs/tags/') ||
+          (github.event_name == 'workflow_dispatch' && inputs.create_draft_release)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('draft-{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          name: DeepSearch desktop build ${{ github.run_number }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/DeepSearch_Chat_App.exe
+            dist/UsageLimitEditor.exe
